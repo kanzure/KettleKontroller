@@ -1,0 +1,171 @@
+/* KettleKontroller 1.0
+by Cathal Garvey
+Released under the terms of the Gnu Public License.
+See the attached ReadMe which should have come with this code.
+
+*/
+
+//Pins in use for Bath Control (change as required):
+const int TempPin = A0;
+const int HeatPin = 13;
+const int FiringPin = 11; // Set this pin to HIGH (i.e. w/switch) to start the cycler.
+
+//Temperatures used for cycling: Change according to enzyme and primers used:
+float TargetTemp = 50;
+float GlobalError = 0.5; //Within how many degrees to maintain temperature.
+float TempHolder; //Used to hold temperature readings per-cycle.
+
+// Failsafes:
+//float FailSafeTemp = 55;
+float FailSafeRange = 3;
+float UpperFailSafe = TargetTemp + FailSafeRange;
+float LowerFailSafe; // Is set to TargetTemp-FailSafeRange by failsafe once TempNotReached = false
+boolean TempNotReached; // Is set to false once TempHolder > (TargetTemp-GlobalError)
+boolean FailsafeRan;
+boolean FailsafeWithinBounds;
+
+//When not pulsing, serial data must be paced but delays can't be used or program flow is interrupted.
+//The following two values only apply to the PushData function.
+long TimeHolder; //Used to pace data output when temperature is stable
+long DataInterval = 1500; //Minimum time to wait between pushing serial data
+
+//Timer parameters used to control heat-pulse delivery:
+unsigned long RestTracker; //Used to track how long a between-pulse rest has lasted.
+unsigned long HeatTracker; //Used to track how long a heat-pulse has lasted
+//Heat Pulsing parameters; for fine-tuning your setup.
+const int HeatPulseDur = 500; //Sets the amount of time in milliseconds the heat-source is given each pulse
+const int RestPulseDur = 1200; //Sets the time between pulses while temperature equilibriates and/or sensor updates
+
+boolean DataLogging = true; //Alternative to Verbose; outputs csv.
+boolean Debug = false; // Tell me everything, including annoying temperature read data
+boolean WaitTilPinPull = true; //Sets the arduino to wait for firingpin to pull before going.
+
+void setup()
+ {
+  Serial.begin(9600); //opens serial port, sets data rate to 9600 bps
+  pinMode(FiringPin,INPUT);
+  pinMode(TempPin,INPUT);
+  pinMode(HeatPin,OUTPUT);
+  if(DataLogging){
+    delay(2000); //Gives you time to set up the serial monitor
+    Serial.println("Time(s),Target(C),Actual(C)");
+  }
+  
+  LowerFailSafe = 5; // Is set to TargetTemp-FailSafeRange by failsafe once TempNotReached = false
+  TempNotReached = true; // Is set to false once TempHolder > (TargetTemp-GlobalError)
+  FailsafeRan = false;
+  FailsafeWithinBounds = false;
+
+ }
+
+void loop(){
+  if(WaitTilPinPull){PreFlight();}
+  TempHolder = ReadLM35(TempPin); //Set temperature-handler to current sensor reading
+  FailSafe();
+  HoldTemp(TargetTemp); //Maintain temperature at preset value
+ }
+
+void PreFlight(){
+  while(WaitTilPinPull){ //Check are we in preflight mode, and don't start til the pin is pulled.
+    digitalWrite(HeatPin,LOW); //This is just a failsafe, it'll already be low..
+    if(DataLogging){PushData(0);}
+    if(digitalRead(FiringPin) == HIGH){
+      WaitTilPinPull = false;
+    }
+  } //End preflight mode.
+}
+
+void FailSafe(){
+/* float FailSafeRange = 2;
+   float UpperFailSafe = TargetTemp + FailSafeRange;
+   float LowerFailSafe = 5; // Is set to TargetTemp-FailSafeRange by failsafe once TempNotReached = false
+   boolean TempNotReached = true; // Is set to false once TempHolder > (TargetTemp-GlobalError) */  
+  if((LowerFailSafe < TempHolder) && (TempHolder < UpperFailSafe)){
+    // Temperature within normal range
+    if(Debug){
+      FailsafeRan = true;
+      FailsafeWithinBounds = ((LowerFailSafe < TempHolder) && (TempHolder < UpperFailSafe));
+    }
+    if(TempNotReached && (TempHolder >= (TargetTemp - GlobalError))){
+      TempNotReached = false;
+      LowerFailSafe = TargetTemp - FailSafeRange;
+    }
+  }
+  else{
+    while(true){
+      //Failsafe Enabled. Don't call any external scripts or functions.
+      Serial.println("Failsafe boundaries exceeded! System Shutdown!");
+      Serial.print("Temperature at shutdown: ");
+      Serial.println(TempHolder);
+      digitalWrite(HeatPin,LOW);
+      delay(1000); //Repeat every second
+    }
+  }
+}
+
+void HoldTemp(float TargetTemp){
+      if(TempHolder < (TargetTemp-GlobalError)){ //If temperature is not yet at target...
+        if(DataLogging){PushData(TargetTemp);}
+         HeatPulse(); //Calls Heatpulse to deliver a pulse of heat. Lovely.
+        }
+        else{ //That is, if the temperature is at least TargetTemp-GlobalError..
+          digitalWrite(HeatPin,LOW);
+          // Above is **critical**; otherwise negative control of the pin is left entirely
+          //  to a function (HeatPulse()) that may or may not be called, above!
+
+          if(DataLogging){PushData(TargetTemp);} //Keep on loggin'
+      }
+}
+
+void HeatPulse(){
+//This function was written to use timer variables so that the code wouldn't depend on "delay()" functions to work;
+// this makes things more flexible, but due to the potential for datatype tomfoolery I've included failsafes in the main loop.
+// It wouldn't be a good idea to remove the failsafes or put any while or delay functions in this function unless you know what
+// you are doing and debug it carefully; a heater that gets stuck to "on" is pretty bad news.
+
+  if((millis() - HeatTracker) > HeatPulseDur){
+   digitalWrite(HeatPin,LOW);
+   //if(Debug){Serial.print("millis() = ");Serial.print(millis());Serial.println(" - Ran Heat-off if-loop in HeatPulse()");}
+  }
+  
+  if((millis() - HeatTracker) > (HeatPulseDur + RestPulseDur)){
+   HeatTracker = millis();
+   digitalWrite(HeatPin,HIGH);  
+   //if(Debug){Serial.print("millis() = ");Serial.print(millis());Serial.println(" - Ran Heat-on if-loop in HeatPulse()");}
+  }
+  
+}
+
+
+void PushData(float Targ){
+  if((millis() - TimeHolder) > DataInterval){
+    Serial.print(millis()/1000);Serial.print(",");
+    Serial.print(Targ);Serial.print(",");
+    Serial.println(TempHolder);
+    if(Debug){
+//     Serial.print("HeatTracker: ");Serial.print(HeatTracker);
+//     Serial.print(" - RestTracker: ");Serial.print(RestTracker);
+//     Serial.print(" - millis()-HeatTracker= ");Serial.print(millis() - HeatTracker);
+     if(FailsafeRan){Serial.println("Failsafe Ran. ");FailsafeRan = false;
+       Serial.print("Failsafe Within Bounds: ");Serial.print(FailsafeWithinBounds);
+     }
+     Serial.println(); 
+    }
+    TimeHolder = millis(); //Reset TimeHolder
+  }
+}
+
+float ReadLM35(int tempPin){
+ float temp;
+ temp = 0; // As of Arduino 1.0, had to reset temp to 0. Now nonlocal, or persistant?
+ boolean SensorDebug = false;
+ float ReadNums = 100; //Set to ten, I experienced temperature staying generally 3/4C above target; erroneous sensor readings. Keep high.
+ if(SensorDebug){Serial.println();} //Keeps the debug a bit tidier
+ for(int i = 1; i < (ReadNums+1); i++){ //Read the sensor value ReadNums times and add them all up.
+   temp = temp + analogRead(tempPin);
+   if(SensorDebug){Serial.print("Debug: Reading #");Serial.print(i);Serial.print(": ");Serial.println(temp);} //Spews counts
+ }
+ temp = temp / ReadNums; //Average reading
+ temp = (5.0 * temp * 100.0)/1024.0;  //convert the analog data to temperature in Celcius
+ return temp;
+}
